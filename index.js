@@ -7,30 +7,15 @@ app.use(express.json());
 let client;
 let clientReady = false;
 let initError = null;
-
-// Store last result for upscaling/variations
 let lastResult = null;
 
 async function testDiscordConnection() {
   try {
-    console.log("🔍 Testing Discord connection...");
-    
     const response = await fetch(`https://discord.com/api/v9/users/@me`, {
-      headers: {
-        'Authorization': process.env.DISCORD_TOKEN
-      }
+      headers: { 'Authorization': process.env.DISCORD_TOKEN }
     });
-    
-    if (response.ok) {
-      const userData = await response.json();
-      console.log("✅ Discord token valid, user:", userData.username);
-      return true;
-    } else {
-      console.log("❌ Discord token invalid:", response.status);
-      return false;
-    }
+    return response.ok;
   } catch (error) {
-    console.log("❌ Discord connection error:", error.message);
     return false;
   }
 }
@@ -38,14 +23,9 @@ async function testDiscordConnection() {
 async function init() {
   try {
     console.log("Initializing Midjourney client...");
-    console.log("SERVER_ID:", process.env.SERVER_ID);
-    console.log("CHANNEL_ID:", process.env.CHANNEL_ID);
-    console.log("DISCORD_TOKEN:", process.env.DISCORD_TOKEN ? "set (length: " + process.env.DISCORD_TOKEN.length + ")" : "NOT SET");
-    
     const discordOk = await testDiscordConnection();
     if (!discordOk) {
-      initError = "Discord token invalid or expired";
-      console.error("❌ Discord connection failed");
+      initError = "Discord token invalid";
       return;
     }
     
@@ -57,193 +37,261 @@ async function init() {
       Ws: true,
     });
     
-    console.log("⏳ Calling client.init()...");
     await client.init();
     clientReady = true;
-    console.log("✅ Midjourney client initialized successfully!");
+    console.log("✅ Midjourney client ready!");
   } catch (error) {
-    console.error("❌ Midjourney init error:", error.message);
     initError = error.message;
   }
 }
 
 init();
 
+// Helper: find option by label
+function findOption(result, labelPart) {
+  return result.options?.find(o => o.label.toLowerCase().includes(labelPart.toLowerCase()));
+}
+
 // ===== Routes =====
 
-app.get("/", (req, res) => {
-  res.json({ 
-    status: clientReady ? "ok" : "error", 
-    message: clientReady ? "Midjourney API ready" : "Client not ready",
-    error: initError
-  });
-});
+app.get("/", (req, res) => res.json({ status: clientReady ? "ok" : "error", message: clientReady ? "Ready" : "Not ready", error: initError }));
 
-app.get("/health", (req, res) => {
-  res.json({ 
-    clientReady, 
-    initError,
-    lastResult: lastResult ? {
-      id: lastResult.id,
-      prompt: lastResult.prompt,
-      options: lastResult.options?.map(o => o.label)
-    } : null
-  });
-});
+app.get("/health", (req, res) => res.json({ clientReady, lastResult: lastResult ? { id: lastResult.id, prompt: lastResult.prompt } : null }));
 
 // 🎨 Generate new image
 app.post("/imagine", async (req, res) => {
   const { prompt } = req.body;
-  if (!prompt) {
-    return res.status(400).json({ error: "prompt is required" });
-  }
-
-  if (!client || !clientReady) {
-    return res.status(503).json({ error: "Client not ready", initError });
-  }
+  if (!prompt) return res.status(400).json({ error: "prompt required" });
+  if (!clientReady) return res.status(503).json({ error: "Client not ready" });
 
   try {
-    console.log("🎨 Generating:", prompt);
     const result = await client.Imagine(prompt);
-
-    if (!result) {
-      return res.status(500).json({ error: "No result from Midjourney" });
-    }
-
-    // Store for upscaling/variations
     lastResult = result;
-
-    res.json({
-      id: result.id,
-      prompt: result.prompt,
-      uri: result.uri,
-      progress: result.progress,
-      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
-      message: "Use /upscale or /variation to process further"
-    });
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
   } catch (error) {
-    console.error("❌ Imagine error:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ⬆️ Upscale (U1, U2, U3, U4)
+// ⬆️ Upscale (U1-U4)
 app.post("/upscale", async (req, res) => {
-  const { index = 1 } = req.body; // 1, 2, 3, or 4
-  
-  if (!client || !clientReady) {
-    return res.status(503).json({ error: "Client not ready" });
-  }
+  const { index = 1 } = req.body;
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
 
-  if (!lastResult || !lastResult.options) {
-    return res.status(400).json({ error: "No previous result. Use /imagine first." });
-  }
-
-  const upscaleOption = lastResult.options.find(o => o.label === `U${index}`);
-  if (!upscaleOption) {
-    return res.status(400).json({ error: `U${index} not found` });
-  }
+  const option = findOption(lastResult, `U${index}`);
+  if (!option) return res.status(400).json({ error: `U${index} not found` });
 
   try {
-    console.log(`⬆️ Upscaling U${index}...`);
-    const result = await client.Custom({
-      msgId: lastResult.id,
-      flags: lastResult.flags,
-      customId: upscaleOption.custom,
-      content: lastResult.prompt
-    });
-
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
     lastResult = result;
-
-    res.json({
-      id: result.id,
-      uri: result.uri,
-      progress: result.progress,
-      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
-      message: `U${index} complete! Use /vary or /upscale again.`
-    });
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
   } catch (error) {
-    console.error("❌ Upscale error:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 🔄 Variation (V1, V2, V3, V4)
+// 🔄 Variation (V1-V4)
 app.post("/variation", async (req, res) => {
-  const { index = 1 } = req.body; // 1, 2, 3, or 4
-  
-  if (!client || !clientReady) {
-    return res.status(503).json({ error: "Client not ready" });
-  }
+  const { index = 1 } = req.body;
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
 
-  if (!lastResult || !lastResult.options) {
-    return res.status(400).json({ error: "No previous result. Use /imagine first." });
-  }
-
-  const variationOption = lastResult.options.find(o => o.label === `V${index}`);
-  if (!variationOption) {
-    return res.status(400).json({ error: `V${index} not found` });
-  }
+  const option = findOption(lastResult, `V${index}`);
+  if (!option) return res.status(400).json({ error: `V${index} not found` });
 
   try {
-    console.log(`🔄 Creating variation V${index}...`);
-    const result = await client.Custom({
-      msgId: lastResult.id,
-      flags: lastResult.flags,
-      customId: variationOption.custom,
-      content: lastResult.prompt
-    });
-
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
     lastResult = result;
-
-    res.json({
-      id: result.id,
-      uri: result.uri,
-      progress: result.progress,
-      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
-      message: `V${index} complete! Use /upscale to enlarge.`
-    });
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
   } catch (error) {
-    console.error("❌ Variation error:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 🔁 Reroll (generate again)
-app.post("/reroll", async (req, res) => {
-  if (!client || !clientReady) {
-    return res.status(503).json({ error: "Client not ready" });
-  }
+// 🎭 Vary Subtle
+app.post("/vary-subtle", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
 
-  if (!lastResult) {
-    return res.status(400).json({ error: "No previous result. Use /imagine first." });
-  }
+  const option = findOption(lastResult, "low_variation");
+  if (!option) return res.status(400).json({ error: "Vary option not found" });
 
   try {
-    console.log("🔁 Rerolling...");
-    const rerollOption = lastResult.options?.find(o => o.label.includes("🔄"));
-    if (!rerollOption) {
-      return res.status(400).json({ error: "Reroll option not found" });
-    }
-    
-    const result = await client.Custom({
-      msgId: lastResult.id,
-      flags: lastResult.flags,
-      customId: rerollOption.custom,
-      content: lastResult.prompt
-    });
-
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
     lastResult = result;
-
-    res.json({
-      id: result.id,
-      uri: result.uri,
-      progress: result.progress,
-      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
-      message: "Rerolled! Use /upscale or /variation."
-    });
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
   } catch (error) {
-    console.error("❌ Reroll error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🎭 Vary Strong
+app.post("/vary-strong", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "high_variation");
+  if (!option) return res.status(400).json({ error: "Vary option not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔍 Zoom Out 2x
+app.post("/zoom-2x", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "zoom out 2x");
+  if (!option) return res.status(400).json({ error: "Zoom 2x not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔍 Zoom Out 1.5x
+app.post("/zoom-1-5x", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "zoom out 1.5");
+  if (!option) return res.status(400).json({ error: "Zoom 1.5x not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ↔️ Pan Left
+app.post("/pan-left", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "pan_left");
+  if (!option) return res.status(400).json({ error: "Pan left not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ↔️ Pan Right
+app.post("/pan-right", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "pan_right");
+  if (!option) return res.status(400).json({ error: "Pan right not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ↕️ Pan Up
+app.post("/pan-up", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "pan_up");
+  if (!option) return res.status(400).json({ error: "Pan up not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ↕️ Pan Down
+app.post("/pan-down", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "pan_down");
+  if (!option) return res.status(400).json({ error: "Pan down not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🎬 Animate (High Motion)
+app.post("/animate-high", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "animate_high");
+  if (!option) return res.status(400).json({ error: "Animate not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🎬 Animate (Low Motion)
+app.post("/animate-low", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "animate_low");
+  if (!option) return res.status(400).json({ error: "Animate not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔁 Reroll
+app.post("/reroll", async (req, res) => {
+  if (!clientReady) return res.status(503).json({ error: "Not ready" });
+  if (!lastResult) return res.status(400).json({ error: "No previous result" });
+
+  const option = findOption(lastResult, "🔄");
+  if (!option) return res.status(400).json({ error: "Reroll not found" });
+
+  try {
+    const result = await client.Custom({ msgId: lastResult.id, flags: lastResult.flags, customId: option.custom, content: lastResult.prompt });
+    lastResult = result;
+    res.json({ id: result.id, uri: result.uri, progress: result.progress, options: result.options?.map(o => ({ label: o.label, custom: o.custom })) });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -251,9 +299,4 @@ app.post("/reroll", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Midjourney API running on port ${PORT}`);
-  console.log(`📝 Endpoints:`);
-  console.log(`   POST /imagine   - Generate new image`);
-  console.log(`   POST /upscale   - Upscale (U1-U4)`);
-  console.log(`   POST /variation - Create variation (V1-V4)`);
-  console.log(`   POST /reroll    - Regenerate`);
 });
