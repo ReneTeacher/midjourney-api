@@ -1,18 +1,25 @@
 import { Midjourney } from "midjourney";
 import express from "express";
 
-const client = new Midjourney({
-  ServerId: process.env.SERVER_ID,
-  ChannelId: process.env.CHANNEL_ID,
-  SalaiToken: process.env.DISCORD_TOKEN,
-  Debug: true,
-  Ws: true,
-});
-
-await client.init();
-
 const app = express();
 app.use(express.json());
+
+let client;
+
+async function init() {
+  client = new Midjourney({
+    ServerId: process.env.SERVER_ID,
+    ChannelId: process.env.CHANNEL_ID,
+    SalaiToken: process.env.DISCORD_TOKEN,
+    Debug: true,
+    Ws: true,
+  });
+  
+  await client.init();
+  console.log("Midjourney client initialized");
+}
+
+init().catch(console.error);
 
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Midjourney API ready" });
@@ -22,6 +29,10 @@ app.post("/imagine", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "prompt is required" });
+  }
+
+  if (!client) {
+    return res.status(503).json({ error: "Client not initialized yet" });
   }
 
   try {

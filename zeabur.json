@@ -1,0 +1,8 @@
+{
+  "build": {
+    "runtime": "nodejs",
+    "installCommand": "npm install",
+    "startCommand": "npm start"
+  },
+  "output": "public"
+}
