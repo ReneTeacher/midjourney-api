@@ -2,9 +2,9 @@ import { Midjourney } from "midjourney";
 import express from "express";
 
 const client = new Midjourney({
-  ServerId: process.env.SERVER_ID || "1448339490895560907",
-  ChannelId: process.env.CHANNEL_ID || "1448339661192826961",
-  SalaiToken: process.env.SALAI_TOKEN || "Nzg2NjA5NDA4ODM4MjA1NTIx.G0qAjY.4DO5cOsjMCw1aDfiA6hwADwhAK5h3M0l0u4__A",
+  ServerId: process.env.SERVER_ID,
+  ChannelId: process.env.CHANNEL_ID,
+  SalaiToken: process.env.DISCORD_TOKEN,
   Debug: true,
   Ws: true,
 });
