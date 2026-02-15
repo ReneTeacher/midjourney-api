@@ -8,12 +8,13 @@ let client;
 let clientReady = false;
 let initError = null;
 
-// Test Discord connection first
+// Store last result for upscaling/variations
+let lastResult = null;
+
 async function testDiscordConnection() {
   try {
     console.log("🔍 Testing Discord connection...");
     
-    // Test with a simple HTTP request first
     const response = await fetch(`https://discord.com/api/v9/users/@me`, {
       headers: {
         'Authorization': process.env.DISCORD_TOKEN
@@ -41,7 +42,6 @@ async function init() {
     console.log("CHANNEL_ID:", process.env.CHANNEL_ID);
     console.log("DISCORD_TOKEN:", process.env.DISCORD_TOKEN ? "set (length: " + process.env.DISCORD_TOKEN.length + ")" : "NOT SET");
     
-    // Test Discord connection first
     const discordOk = await testDiscordConnection();
     if (!discordOk) {
       initError = "Discord token invalid or expired";
@@ -49,7 +49,6 @@ async function init() {
       return;
     }
     
-    // Try with minimal config
     client = new Midjourney({
       ServerId: process.env.SERVER_ID,
       ChannelId: process.env.CHANNEL_ID,
@@ -64,13 +63,13 @@ async function init() {
     console.log("✅ Midjourney client initialized successfully!");
   } catch (error) {
     console.error("❌ Midjourney init error:", error.message);
-    console.error("Stack:", error.stack);
     initError = error.message;
   }
 }
 
-// Start init but don't wait
 init();
+
+// ===== Routes =====
 
 app.get("/", (req, res) => {
   res.json({ 
@@ -84,27 +83,23 @@ app.get("/health", (req, res) => {
   res.json({ 
     clientReady, 
     initError,
-    env: {
-      hasServerId: !!process.env.SERVER_ID,
-      hasChannelId: !!process.env.CHANNEL_ID,
-      hasDiscordToken: !!process.env.DISCORD_TOKEN,
-      tokenLength: process.env.DISCORD_TOKEN?.length || 0
-    }
+    lastResult: lastResult ? {
+      id: lastResult.id,
+      prompt: lastResult.prompt,
+      options: lastResult.options?.map(o => o.label)
+    } : null
   });
 });
 
+// 🎨 Generate new image
 app.post("/imagine", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "prompt is required" });
   }
 
-  if (!client) {
-    return res.status(503).json({ error: "Client not initialized" });
-  }
-
-  if (!clientReady) {
-    return res.status(503).json({ error: "Client not ready yet", initError });
+  if (!client || !clientReady) {
+    return res.status(503).json({ error: "Client not ready", initError });
   }
 
   try {
@@ -115,11 +110,16 @@ app.post("/imagine", async (req, res) => {
       return res.status(500).json({ error: "No result from Midjourney" });
     }
 
+    // Store for upscaling/variations
+    lastResult = result;
+
     res.json({
       id: result.id,
       prompt: result.prompt,
       uri: result.uri,
       progress: result.progress,
+      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
+      message: "Use /upscale or /variation to process further"
     });
   } catch (error) {
     console.error("❌ Imagine error:", error);
@@ -127,7 +127,133 @@ app.post("/imagine", async (req, res) => {
   }
 });
 
+// ⬆️ Upscale (U1, U2, U3, U4)
+app.post("/upscale", async (req, res) => {
+  const { index = 1 } = req.body; // 1, 2, 3, or 4
+  
+  if (!client || !clientReady) {
+    return res.status(503).json({ error: "Client not ready" });
+  }
+
+  if (!lastResult || !lastResult.options) {
+    return res.status(400).json({ error: "No previous result. Use /imagine first." });
+  }
+
+  const upscaleOption = lastResult.options.find(o => o.label === `U${index}`);
+  if (!upscaleOption) {
+    return res.status(400).json({ error: `U${index} not found` });
+  }
+
+  try {
+    console.log(`⬆️ Upscaling U${index}...`);
+    const result = await client.Custom({
+      msgId: lastResult.id,
+      flags: lastResult.flags,
+      customId: upscaleOption.custom,
+      content: lastResult.prompt
+    });
+
+    lastResult = result;
+
+    res.json({
+      id: result.id,
+      uri: result.uri,
+      progress: result.progress,
+      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
+      message: `U${index} complete! Use /vary or /upscale again.`
+    });
+  } catch (error) {
+    console.error("❌ Upscale error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔄 Variation (V1, V2, V3, V4)
+app.post("/variation", async (req, res) => {
+  const { index = 1 } = req.body; // 1, 2, 3, or 4
+  
+  if (!client || !clientReady) {
+    return res.status(503).json({ error: "Client not ready" });
+  }
+
+  if (!lastResult || !lastResult.options) {
+    return res.status(400).json({ error: "No previous result. Use /imagine first." });
+  }
+
+  const variationOption = lastResult.options.find(o => o.label === `V${index}`);
+  if (!variationOption) {
+    return res.status(400).json({ error: `V${index} not found` });
+  }
+
+  try {
+    console.log(`🔄 Creating variation V${index}...`);
+    const result = await client.Custom({
+      msgId: lastResult.id,
+      flags: lastResult.flags,
+      customId: variationOption.custom,
+      content: lastResult.prompt
+    });
+
+    lastResult = result;
+
+    res.json({
+      id: result.id,
+      uri: result.uri,
+      progress: result.progress,
+      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
+      message: `V${index} complete! Use /upscale to enlarge.`
+    });
+  } catch (error) {
+    console.error("❌ Variation error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔁 Reroll (generate again)
+app.post("/reroll", async (req, res) => {
+  if (!client || !clientReady) {
+    return res.status(503).json({ error: "Client not ready" });
+  }
+
+  if (!lastResult) {
+    return res.status(400).json({ error: "No previous result. Use /imagine first." });
+  }
+
+  try {
+    console.log("🔁 Rerolling...");
+    const rerollOption = lastResult.options?.find(o => o.label.includes("🔄"));
+    if (!rerollOption) {
+      return res.status(400).json({ error: "Reroll option not found" });
+    }
+    
+    const result = await client.Custom({
+      msgId: lastResult.id,
+      flags: lastResult.flags,
+      customId: rerollOption.custom,
+      content: lastResult.prompt
+    });
+
+    lastResult = result;
+
+    res.json({
+      id: result.id,
+      uri: result.uri,
+      progress: result.progress,
+      options: result.options?.map(o => ({ label: o.label, custom: o.custom })),
+      message: "Rerolled! Use /upscale or /variation."
+    });
+  } catch (error) {
+    console.error("❌ Reroll error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Midjourney API running on port ${PORT}`);
+  console.log(`📝 Endpoints:`);
+  console.log(`   POST /imagine   - Generate new image`);
+  console.log(`   POST /upscale   - Upscale (U1-U4)`);
+  console.log(`   POST /variation - Create variation (V1-V4)`);
+  console.log(`   POST /reroll    - Regenerate`);
 });
