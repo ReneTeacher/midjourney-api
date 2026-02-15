@@ -20,7 +20,7 @@ async function init() {
       ChannelId: process.env.CHANNEL_ID,
       SalaiToken: process.env.DISCORD_TOKEN,
       Debug: true,
-      Ws: true,
+      Ws: false,  // Disable WS, use polling instead
     });
     
     await client.init();
@@ -29,6 +29,25 @@ async function init() {
   } catch (error) {
     console.error("❌ Midjourney init error:", error.message);
     initError = error.message;
+    
+    // Retry once after 3 seconds
+    setTimeout(async () => {
+      try {
+        console.log("🔄 Retrying initialization...");
+        client = new Midjourney({
+          ServerId: process.env.SERVER_ID,
+          ChannelId: process.env.CHANNEL_ID,
+          SalaiToken: process.env.DISCORD_TOKEN,
+          Debug: true,
+          Ws: false,
+        });
+        await client.init();
+        clientReady = true;
+        console.log("✅ Midjourney client initialized on retry!");
+      } catch (retryError) {
+        console.error("❌ Retry also failed:", retryError.message);
+      }
+    }, 3000);
   }
 }
 
@@ -64,6 +83,13 @@ app.post("/imagine", async (req, res) => {
     return res.status(503).json({ error: "Client not initialized" });
   }
 
+  // Wait for client to be ready
+  let retries = 0;
+  while (!clientReady && retries < 10) {
+    await new Promise(r => setTimeout(r, 1000));
+    retries++;
+  }
+  
   if (!clientReady) {
     return res.status(503).json({ error: "Client not ready yet", initError });
   }
